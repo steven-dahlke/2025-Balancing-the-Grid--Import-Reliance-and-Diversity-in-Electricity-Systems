@@ -1,0 +1,80 @@
+# Calculate import dependency during periods when net load is >=95th percentile value across sample pd
+
+rm(list=ls())
+library(readxl)
+library(dplyr)
+library(lubridate)
+
+
+BAs <- c("YAD", "AZPS", "DEAA", "AECI", "AVRN", "AVA", "BANC", "BPAT", "CISO", "HST", "TPWR", "TAL", "SCEG", "DUK", "FPC", "CPLE", "CPLW", "EPE", "EEI", "ERCO", "FMPP", "FPL", "GVL", "GRMA", "GLHB", "GRID", "GRIF", "ISNE", "IPCO", "IID", "JEA", "LDWP", "LGEE", "MISO", "GWA", "WWA", "NEVP", "HGMA", "NYIS", "NWMT", "OVEC", "PJM", "DOPD", "PACE", "PACW", "PGE", "AEC", "PSCO", "PNM", "CHPD", "GCPD", "PSEI", "SRP", "SCL", "SEC", "SC", "SEPA", "SOCO", "SWPP", "SPA", "TEC", "TVA", "TEPC", "TIDC", "NSB", "WALC", "WACM", "WAUW")
+sort(BAs) -> BAs
+
+#colnames <- c( "Total", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023",'gen_only?','avg_demand')
+colnames <- c('IDp95', 'ID')
+nlid <- data.frame(matrix(ncol = length(colnames), nrow = 68))
+colnames(nlid) <- colnames
+rownames(nlid) <- BAs
+nlid$`gen_only?`<- "N"
+
+#BA <- 'DUK'
+for(BA in BAs){
+  file <- paste0('data/BAs/',BA,'.xlsx')
+  df <- read_xlsx(file,  guess_max=100000)
+  if(df[[1,'Generation only?']]=='Y'){
+    nlid[rownames(nlid)==BA,'gen_only?'] <- "Y"
+    next
+  }
+  logical_cols <- sapply(df, is.logical)
+  df[, logical_cols] <- lapply(df[, logical_cols, drop = FALSE], function(x) as.numeric(as.character(x)))
+  
+  drop <- c('DF','D','NG','TI','Imputed D','Imputed NG','Imputed TI')
+  df <- df[,!(names(df) %in% drop)]
+  df <- df %>% select(-starts_with("NG:"))                    
+  df <- df %>% select(-starts_with("Imputed"))              
+  df <- df %>% select(-starts_with("CO2"))    
+  
+  #Create Mountain Time Zone variable
+  df$`UTC time` <- as.POSIXct(df$`UTC time`, tz = "UTC")
+  df$mtn_time <- with_tz(df$`UTC time`, tzone='America/Denver')
+  
+  df$year <- year(df$mtn_time)
+  
+  df[is.na(df$`Adjusted TI`),'Adjusted TI'] <- df[is.na(df$`Adjusted TI`),'Adjusted NG'] - df[is.na(df$`Adjusted TI`),'Adjusted D']
+
+  nlid[rownames(nlid)==BA,'avg_demand']  <- sum(df$`Adjusted D`, na.rm = TRUE)/nrow(df)
+  
+  
+  # Import dependency during high net load periods
+  df %>% mutate(imports = ifelse(`Adjusted TI` < 0, -`Adjusted TI`, 0)) -> df
+  NAsD <- df[is.na(df$`Adjusted D`),]
+  NAsTI <- df[is.na(df$`Adjusted TI`),]
+  df <- df %>% filter(!is.na(`Adjusted D`))
+  
+  nlid[rownames(nlid)==BA,'TI_hrs_missing'] <- nrow(NAsTI)
+  nlid[rownames(nlid)==BA,'D_hrs_missing'] <- nrow(NAsD)
+  
+  #ID hours of high net load
+  df <- df[df$mtn_time>'2017-12-31 23:00:00',]
+  df[is.na(df$`Adjusted SUN Gen`), 'Adjusted SUN Gen'] <- 0
+  df[is.na(df$`Adjusted WND Gen`), 'Adjusted WND Gen'] <- 0
+  
+  df$var <- df$`Adjusted SUN Gen` + df$`Adjusted WND Gen`
+  df <- df %>% filter(!is.na(var))
+  df <- df[df$year<2024,]
+  
+  #Calculate 95+percentile net load hours
+  df$nload <- df$`Adjusted D` - df$var
+  df$p95 <- df$nload >= quantile(df$nload, 0.95)
+  
+  #Calculate import dependency during these high net load periods
+  nlid[rownames(nlid)==BA,'IDp95'] <- sum(df[df$p95==TRUE,'imports'], na.rm=TRUE)/sum(df[df$p95==TRUE, 'Adjusted D'], na.rm=TRUE)
+  nlid[rownames(nlid)==BA,'ID'] <- sum(df[,'imports'], na.rm=TRUE)/sum(df[, 'Adjusted D'], na.rm=TRUE)
+}  
+  
+  write.csv(nlid, 'data/import dependency high net load.csv')
+  
+  
+  
+  
+  
+  
